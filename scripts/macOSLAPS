@@ -43,6 +43,12 @@ sys.path.insert(0, '/usr/local/munki')
 sys.path.insert(0, '/usr/local/munkireport')
 from munkilib import reportcommon
 
+
+def format_datetime(timestamp):
+    dt = datetime.utcfromtimestamp(timestamp)
+    return dt.isoformat(' ')
+
+
 class macOSLAPS(object):
     '''main class of application'''
     # Current time
@@ -98,6 +104,61 @@ class macOSLAPS(object):
             password.insert(i, choice(characters))
         return ''.join(password)
 
+    def change_password(self, local_admin, pass_length, keychain_remove):
+        # Set new random password
+        password = LAPS.make_random_password(pass_length)
+        try:
+            # Connect to Local Node
+            local_node, error = ODNode.nodeWithSession_name_error_(
+                ODSession.defaultSession(), '/Local/Default', None)
+            if error:
+                log_error('Error getting local node: %s', error)
+            # Pull Local Administrator Record
+            local_admin_change, error = local_node.\
+                recordWithRecordType_name_attributes_error_(
+                    kODRecordTypeUsers, local_admin, None, None)
+            if error:
+                log_error('Error getting local admin record: %s', error)
+            # Change the password for the account
+            result, error = local_admin_change.changePassword_toPassword_error_(
+                None, password, None)
+            if error:
+                log_error('Error changing local admin password: %s', error)
+            if result:
+                log_info(' Password change was successful')
+            else:
+                raise RuntimeError('Password change failed')
+            # Delete local admin's keychain if removal is enabled
+            if keychain_remove is True:
+                # Get local admin's home folder
+                cmd = ['/usr/bin/dscl', '.', '-read', '/Users/'+local_admin, 'NFSHomeDirectory']
+                proc = subprocess.Popen(cmd, shell=False, bufsize=-1, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                (output, unused_error) = proc.communicate()
+                local_admin_path = output.strip('NFSHomeDirectory: ').rstrip("\n\r")+'/Library/Keychains'
+                
+                # Delete if exists
+                if path.exists(local_admin_path):
+                    rmtree(local_admin_path)
+                    log_info(' Removed keychains for local '
+                             'administrator account {0:}.'
+                             .format(local_admin))
+                else:
+                    log_info(' The keychain directory for '
+                             '{0:} does not exist. Keychain '
+                             'removal not required...'.format(local_admin))
+            else:
+                log_info(' Keychain has NOT been modified. Keep '
+                         'in mind that this may cause keychain '
+                         'prompts and the old password may not '
+                         'be accessible.')
+
+            return password
+
+        except Exception as error:
+            log_error(error)
+            exit(1)
+
+
     def password_check(self):
         '''Perform a password check and change the local
         admin password and write it to the plist if
@@ -111,12 +172,9 @@ class macOSLAPS(object):
         alpha_numeric_only = LAPS.get_config_settings('AlphaNumericOnly')
         script_enabled = LAPS.get_config_settings('Enabled')
         remote_management = LAPS.get_config_settings('RemoteManagementEnabled')
-        password = LAPS.make_random_password(pass_length)
 
         # Get password expiration in future epoch time
-        utc_time = datetime.utcfromtimestamp(int(time.time()))
-        expiration_time = utc_time + timedelta(exp_days)
-        epoch_time = int(time.time())
+        time_now = int(time.time())
         epoch_expiration_time = (int(time.time())+(86400*exp_days))
         
         # Try to get JSON from MunkiReport server
@@ -180,94 +238,46 @@ class macOSLAPS(object):
             exit(0)
     
         # Determine if the password expired and then change it
-        if int(result['dateexpires']) < epoch_time:
+        if int(result['dateexpires']) < time_now:
             # Log that the password change is being started
             log_info(' Password change required.'
                      ' Performing password change...')
-            try:
-                plistout = {}
-                # Set new random password in plist
-                plistout['password'] = password
-                # Change the local admin password
-                log_info(' Setting random password for local'
-                         ' admin account %s...', local_admin)
-                # Connect to Local Node
-                local_node, error = ODNode.nodeWithSession_name_error_(
-                    ODSession.defaultSession(), '/Local/Default', None)
-                if error:
-                    log_error('Error getting local node: %s', error)
-                # Pull Local Administrator Record
-                local_admin_change, error = local_node.\
-                    recordWithRecordType_name_attributes_error_(
-                        kODRecordTypeUsers, local_admin, None, None)
-                if error:
-                    log_error('Error getting local admin record: %s', error)
-                # Change the password for the account
-                result, error = local_admin_change.changePassword_toPassword_error_(
-                    None, password, None)
-                if error:
-                    log_error('Error changing local admin password: %s', error)
-                if result:
-                    log_info(' Password change was successful')
-                else:
-                    raise RuntimeError('Password change failed')
-                # Set expiration time in plist
-                plistout['dateexpires'] = epoch_expiration_time
-                log_info(' Password change has been completed. '
-                         ' New expiration date is %s',
-                         expiration_time)
-                # Delete local admin's keychain if removal is enabled
-                if keychain_remove is True:
-                    # Get local admin's home folder
-                    cmd = ['/usr/bin/dscl', '.', '-read', '/Users/'+local_admin, 'NFSHomeDirectory']
-                    proc = subprocess.Popen(cmd, shell=False, bufsize=-1, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    (output, unused_error) = proc.communicate()
-                    local_admin_path = output.strip('NFSHomeDirectory: ').rstrip("\n\r")+'/Library/Keychains'
-                    
-                    # Delete if exists
-                    if path.exists(local_admin_path):
-                        rmtree(local_admin_path)
-                        log_info(' Removed keychains for local '
-                                 'administrator account {0:}.'
-                                 .format(local_admin))
-                    else:
-                        log_info(' The keychain directory for '
-                                 '{0:} does not exist. Keychain '
-                                 'removal not required...'.format(local_admin))
-                else:
-                    log_info(' Keychain has NOT been modified. Keep '
-                             'in mind that this may cause keychain '
-                             'prompts and the old password may not '
-                             'be accessible.')
+            plistout = {}
+            # Change the local admin password
+            log_info(' Setting random password for local'
+                     ' admin account %s...', local_admin)
+            plistout['password'] = self.change_password(local_admin, pass_length, keychain_remove)
+            log_info(' Password change has been completed. '
+                     ' New expiration date is %s',
+                     format_datetime(epoch_expiration_time))
 
-                # Set user account in plist
-                plistout['useraccount'] = local_admin
-                # Set password set date in plist
-                plistout['dateset'] = epoch_time
-                # Set days between password expiration in plist
-                plistout['days_till_expiration'] = exp_days
-                # Set alpha_numeric_only in plist
-                plistout['alpha_numeric_only'] = alpha_numeric_only
-                # Set script_enabled in plist
-                plistout['script_enabled'] = script_enabled
-                # Set keychain_remove in plist
-                plistout['keychain_remove'] = keychain_remove
-                # Set pass_length in plist
-                plistout['pass_length'] = pass_length
-                # Set remote_management in plist
-                plistout['remote_management'] = remote_management
+            # Set expiration time in plist
+            plistout['dateexpires'] = epoch_expiration_time
+            # Set user account in plist
+            plistout['useraccount'] = local_admin
+            # Set password set date in plist
+            plistout['dateset'] = time_now
+            # Set days between password expiration in plist
+            plistout['days_till_expiration'] = exp_days
+            # Set alpha_numeric_only in plist
+            plistout['alpha_numeric_only'] = alpha_numeric_only
+            # Set script_enabled in plist
+            plistout['script_enabled'] = script_enabled
+            # Set keychain_remove in plist
+            plistout['keychain_remove'] = keychain_remove
+            # Set pass_length in plist
+            plistout['pass_length'] = pass_length
+            # Set remote_management in plist
+            plistout['remote_management'] = remote_management
 
-                # Write out plist to save password and other info
-                plistlib.writePlist(plistout, '/var/root/.mrlaps')
-                log_info(' Writing out cache file for postflight to pick up.')
+            # Write out plist to save password and other info
+            plistlib.writePlist(plistout, '/var/root/.mrlaps')
+            log_info(' Writing out cache file for postflight to pick up.')
 
-            except Exception as error:
-                log_error(error)
-                exit(1)
         else:
             # Log that a password change is not necessary at this time
             log_info(' Password change not necessary at this time as'
-                     ' the expiration date is %s', expiration_time)
+                     ' the expiration date is %s', format_datetime(epoch_expiration_time))
             
             # If plist exists
             if os.path.isfile('/var/root/.mrlaps'):
