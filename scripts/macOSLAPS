@@ -65,6 +65,9 @@ class macOSLAPS(object):
     log_config(filename='/Library/Logs/macOSLAPS.log',
                level=10, format=log_format)
  
+    def __init__(self, use_external_laps):
+        self.use_external_laps = use_external_laps
+
     def get_config_settings(self, preference_key):
         '''Function to retrieve configuration settings from
         /Library/Preferences or /Library/Managed Preferences'''
@@ -98,6 +101,77 @@ class macOSLAPS(object):
             password.insert(i, choice(characters))
         return ''.join(password)
 
+    def change_password_external(self):
+        try:
+            subprocess.run(['/usr/local/laps/macOSLAPS', '-resetPassword'], check=True)
+            subprocess.run(['/usr/local/laps/macOSLAPS', '-getPassword'], check=True)
+            with io.open('/var/root/Library/Application Support/macOSLAPS-password', encoding="utf-8") as f:
+                password = f.readline().strip()
+                expiration_string = f.readline().strip()
+            os.remove('/var/root/Library/Application Support/macOSLAPS-password')
+            return password
+        except Exception as error:
+            log_error(error)
+            exit(1)
+
+    def change_password(self, local_admin, pass_length, keychain_remove):
+        if self.use_external_laps:
+            return self.change_password_external()
+
+        # Set new random password
+        password = LAPS.make_random_password(pass_length)
+        try:
+            # Connect to Local Node
+            local_node, error = ODNode.nodeWithSession_name_error_(
+                ODSession.defaultSession(), '/Local/Default', None)
+            if error:
+                log_error('Error getting local node: %s', error)
+            # Pull Local Administrator Record
+            local_admin_change, error = local_node.\
+                recordWithRecordType_name_attributes_error_(
+                    kODRecordTypeUsers, local_admin, None, None)
+            if error:
+                log_error('Error getting local admin record: %s', error)
+            # Change the password for the account
+            result, error = local_admin_change.changePassword_toPassword_error_(
+                None, password, None)
+            if error:
+                log_error('Error changing local admin password: %s', error)
+            if result:
+                log_info(' Password change was successful')
+            else:
+                raise RuntimeError('Password change failed')
+            # Delete local admin's keychain if removal is enabled
+            if keychain_remove is True:
+                # Get local admin's home folder
+                cmd = ['/usr/bin/dscl', '.', '-read', '/Users/'+local_admin, 'NFSHomeDirectory']
+                proc = subprocess.Popen(cmd, shell=False, bufsize=-1, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                (output, unused_error) = proc.communicate()
+                local_admin_path = output.strip('NFSHomeDirectory: ').rstrip("\n\r")+'/Library/Keychains'
+                
+                # Delete if exists
+                if path.exists(local_admin_path):
+                    rmtree(local_admin_path)
+                    log_info(' Removed keychains for local '
+                             'administrator account {0:}.'
+                             .format(local_admin))
+                else:
+                    log_info(' The keychain directory for '
+                             '{0:} does not exist. Keychain '
+                             'removal not required...'.format(local_admin))
+            else:
+                log_info(' Keychain has NOT been modified. Keep '
+                         'in mind that this may cause keychain '
+                         'prompts and the old password may not '
+                         'be accessible.')
+
+            return password
+
+        except Exception as error:
+            log_error(error)
+            exit(1)
+
+
     def password_check(self):
         '''Perform a password check and change the local
         admin password and write it to the plist if
@@ -111,7 +185,6 @@ class macOSLAPS(object):
         alpha_numeric_only = LAPS.get_config_settings('AlphaNumericOnly')
         script_enabled = LAPS.get_config_settings('Enabled')
         remote_management = LAPS.get_config_settings('RemoteManagementEnabled')
-        password = LAPS.make_random_password(pass_length)
 
         # Get password expiration in future epoch time
         utc_time = datetime.utcfromtimestamp(int(time.time()))
@@ -191,60 +264,16 @@ class macOSLAPS(object):
                      ' Performing password change...')
             try:
                 plistout = {}
-                # Set new random password in plist
-                plistout['password'] = password
-                # Change the local admin password
+        # Change the local admin password
                 log_info(' Setting random password for local'
                          ' admin account %s...', local_admin)
-                # Connect to Local Node
-                local_node, error = ODNode.nodeWithSession_name_error_(
-                    ODSession.defaultSession(), '/Local/Default', None)
-                if error:
-                    log_error('Error getting local node: %s', error)
-                # Pull Local Administrator Record
-                local_admin_change, error = local_node.\
-                    recordWithRecordType_name_attributes_error_(
-                        kODRecordTypeUsers, local_admin, None, None)
-                if error:
-                    log_error('Error getting local admin record: %s', error)
-                # Change the password for the account
-                result, error = local_admin_change.changePassword_toPassword_error_(
-                    None, password, None)
-                if error:
-                    log_error('Error changing local admin password: %s', error)
-                if result:
-                    log_info(' Password change was successful')
-                else:
-                    raise RuntimeError('Password change failed')
-                # Set expiration time in plist
-                plistout['dateexpires'] = epoch_expiration_time
+                # Set new random password in plist
+                plistout['password'] = self.change_password(local_admin, pass_length, keychain_remove)
                 log_info(' Password change has been completed. '
                          ' New expiration date is %s',
                          expiration_time)
-                # Delete local admin's keychain if removal is enabled
-                if keychain_remove is True:
-                    # Get local admin's home folder
-                    cmd = ['/usr/bin/dscl', '.', '-read', '/Users/'+local_admin, 'NFSHomeDirectory']
-                    proc = subprocess.Popen(cmd, shell=False, bufsize=-1, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    (output, unused_error) = proc.communicate()
-                    local_admin_path = output.strip('NFSHomeDirectory: ').rstrip("\n\r")+'/Library/Keychains'
-                    
-                    # Delete if exists
-                    if path.exists(local_admin_path):
-                        rmtree(local_admin_path)
-                        log_info(' Removed keychains for local '
-                                 'administrator account {0:}.'
-                                 .format(local_admin))
-                    else:
-                        log_info(' The keychain directory for '
-                                 '{0:} does not exist. Keychain '
-                                 'removal not required...'.format(local_admin))
-                else:
-                    log_info(' Keychain has NOT been modified. Keep '
-                             'in mind that this may cause keychain '
-                             'prompts and the old password may not '
-                             'be accessible.')
-
+                # Set expiration time in plist
+                plistout['dateexpires'] = epoch_expiration_time
                 # Set user account in plist
                 plistout['useraccount'] = local_admin
                 # Set password set date in plist
@@ -321,16 +350,22 @@ class macOSLAPS(object):
                         log_info(' Clearing cached password, because it is in MunkiReport.')
             exit(0)
             
-# Exit if Joshua Miller's macOSLAPS is installed
+# Check if Joshua Miller's macOSLAPS is installed
+use_external_laps = False
 if os.path.isfile('/usr/local/laps/macOSLAPS'):
-    print('Skipping macOSLAPS run, Joshua Miller\'s macOSLAPS script appears to be installed and configured')
-    log_info(' Skipping macOSLAPS run, Joshua Miller\'s macOSLAPS script appears to be installed and configured.')
-    exit(0)
+    method = CFPreferencesCopyAppValue('Method', 'edu.psu.macoslaps')
+    if method == "Local":
+        print("Using external macOSLAPS")
+        use_external_laps = True
+    else:
+        print('Skipping macOSLAPS run, Joshua Miller\'s macOSLAPS script appears to be installed and configured for AD')
+        log_info(' Skipping macOSLAPS run, Joshua Miller\'s macOSLAPS script appears to be installed and configured for AD.')
+        exit(0)
 if os.path.isfile('/Library/LaunchDaemons/edu.psu.macoslaps-check.plist'):
     print('Skipping macOSLAPS run, Joshua Miller\'s macOSLAPS script appears to be installed and configured')
     log_info(' Skipping macOSLAPS run, Joshua Miller\'s macOSLAPS script appears to be installed and configured.')
     exit(0)
             
             
-LAPS = macOSLAPS()
+LAPS = macOSLAPS(use_external_laps)
 LAPS.password_check()
