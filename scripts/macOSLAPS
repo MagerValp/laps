@@ -245,7 +245,7 @@ class macOSLAPS(object):
                     result = plistlib.readPlist('/var/root/.mrlaps')
                 except:
                     with open('/var/root/.mrlaps', 'rb') as fp:
-                        result = plistlib.load('/var/root/.mrlaps')
+                        result = plistlib.load(fp)
 
             else:
                 # Cached response doesn't exist, likely first run, using defaults
@@ -313,7 +313,7 @@ class macOSLAPS(object):
                     stored_plist = plistlib.readPlist('/var/root/.mrlaps')
                 except:
                     with open('/var/root/.mrlaps', 'rb') as fp:
-                        stored_plist = plistlib.load('/var/root/.mrlaps')
+                        stored_plist = plistlib.load(fp)
 
                 # If remote management is set, update cache file with preferences
                 if remote_management:   
