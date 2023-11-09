@@ -105,7 +105,7 @@ class macOSLAPS(object):
         try:
             subprocess.run(['/usr/local/laps/macOSLAPS', '-resetPassword'], check=True)
             subprocess.run(['/usr/local/laps/macOSLAPS', '-getPassword'], check=True)
-            with io.open('/var/root/Library/Application Support/macOSLAPS-password', encoding="utf-8") as f:
+            with open('/var/root/Library/Application Support/macOSLAPS-password', encoding="utf-8") as f:
                 password = f.readline().strip()
                 expiration_string = f.readline().strip()
             os.remove('/var/root/Library/Application Support/macOSLAPS-password')
